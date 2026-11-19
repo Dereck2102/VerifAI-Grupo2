@@ -1,7 +1,20 @@
+# Core FastAPI Backend
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.6
-playwright>=1.47.0
-playwright-stealth>=1.0.6
 pydantic>=2.9.2
 websockets>=12.0
 python-dotenv>=1.0.1
+
+# Scraping Engine (Async Playwright)
+playwright>=1.47.0
+playwright-stealth>=1.0.6
+
+# Storage & Export
+openpyxl>=3.1.5
+
+# AI & Psychometrics (OCEAN embeddings & Gemini Advisory)
+# En Docker se instalan automáticamente; localmente el backend usa fallback si no están presentes
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+scikit-learn>=1.5.0
+google-genai>=0.1.1

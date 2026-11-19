@@ -3,17 +3,25 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    types = None
+    GENAI_AVAILABLE = False
 from dotenv import load_dotenv
 
 # Localizar la ruta del archivo .env dentro de backend/
-backend_dir = Path(__file__).resolve().parent.parent
+backend_dir = Path(__file__).resolve().parent.parent.parent.parent
 env_path = backend_dir / ".env"
 load_dotenv(dotenv_path=env_path)
 
 class GeminiAuditService:
     def __init__(self):
+        if not GENAI_AVAILABLE:
+            raise RuntimeError("El paquete 'google-genai' no está instalado en el entorno.")
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError(f"Falta GOOGLE_API_KEY en {env_path}")
