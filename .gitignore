@@ -12,6 +12,16 @@ tiktok_edge_profile/
 **/tiktok_edge_profile/**
 SingletonLock
 
+# IDE
+.vs/
+.vscode/
+
+# Base de datos y perfiles locales
+backend/data/
+*.db
+tiktok_browser_profile/
+**/tiktok_browser_profile/**
+
 # Dependencias y entornos virtuales (en raíz y dentro de backend/)
 venv/
 **/venv/
