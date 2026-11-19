@@ -10,12 +10,12 @@ export default function Navbar({ lanIp, lanPort, onOpenMobile }) {
         </div>
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-xl font-bold tracking-tight text-white">TikTok Scraper</h1>
+            <h1 className="text-xl font-bold tracking-tight text-white">VerifIA</h1>
             <span className="text-[11px] font-semibold tracking-wide uppercase px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">
-              LAN & QR Suite
+              Suite
             </span>
           </div>
-          <p className="text-xs text-slate-400">Extracción sin API • FastAPI + Playwright Stealth • Acceso Wi-Fi Local</p>
+          <p className="text-xs text-slate-400">Auditoria y Analitica • FastAPI + Playwright • Acceso Wi-Fi Local</p>
         </div>
       </div>
 

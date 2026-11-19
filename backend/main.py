@@ -20,7 +20,7 @@ from contexts.storage.repository import default_repository
 from contexts.analytics.analytics_service import default_dashboard_builder, AccountBenchmarker
 from contexts.exporters.exporter_service import default_exporter_registry, XLSX_DISPONIBLE
 
-app = FastAPI(title="VerifAI & TikTok Scraper Pro API", version="2.0.0")
+app = FastAPI(title="VerifIA", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,

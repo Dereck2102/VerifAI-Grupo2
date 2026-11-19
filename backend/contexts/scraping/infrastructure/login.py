@@ -12,15 +12,15 @@ def generar_sesion():
         page.goto("https://www.tiktok.com/login")
 
         print("-----------------------------------------------------")
-        print("🛑 ACCIÓN REQUERIDA: Inicia sesión manualmente en la ventana.")
-        print("Usa tu cuenta de Google y completa cualquier Captcha.")
-        print("Tienes 3 minutos. El script guardará la sesión cuando termines.")
+        print("[AVISO] ACCION REQUERIDA: Inicia sesion manualmente en la ventana.")
+        print("Usa tu cuenta y completa cualquier Captcha.")
+        print("Tienes 3 minutos. El script guardara la sesion cuando termines.")
         print("-----------------------------------------------------")
 
         # Esperar hasta que el usuario inicie sesión y aparezca el botón de perfil o pasen 3 minutos
         try:
             page.wait_for_selector('[data-e2e="profile-icon"]', timeout=180000)
-            print("[3] ¡Inicio de sesión detectado con éxito!")
+            print("[3] Inicio de sesion detectado con exito.")
         except:
             print("[WARN] Tiempo agotado o el selector del perfil no apareció. Guardando estado de todas formas...")
 

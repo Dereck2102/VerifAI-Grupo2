@@ -7,7 +7,7 @@ export function TopNav({ backendIp }) {
     <View style={s.nav}>
       <LogoBadge />
       <View style={{ flex: 1, marginLeft: 10 }}>
-        <Text style={s.title}>VerifAI Scraper</Text>
+        <Text style={s.title}>VerifIA</Text>
         <Text style={s.sub}>LAN: {backendIp}:8000</Text>
       </View>
       <StealthBadge />
