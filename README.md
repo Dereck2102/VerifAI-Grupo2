@@ -78,7 +78,7 @@ playwright install chromium
 python main.py
 ```
 
-> **Nota:** Configura tu `GOOGLE_API_KEY` en `backend/.env` si deseas habilitar los reportes de Google Gemini.
+> **Gemini:** Puedes pegar tu API key en el campo enmascarado de la interfaz web. Solo permanece en memoria mientras la página está abierta y se envía al backend al generar el reporte; no se persiste en `localStorage` ni en el repositorio. Como alternativa para desarrollo local, puedes definir `GOOGLE_API_KEY` en `backend/.env` (este archivo está ignorado por Git). El backend local usa HTTP; evita enviar la clave desde redes compartidas sin HTTPS.
 
 #### 2. Frontend (Node.js 18+)
 

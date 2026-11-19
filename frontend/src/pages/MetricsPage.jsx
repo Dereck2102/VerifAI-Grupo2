@@ -19,6 +19,7 @@ export default function MetricsPage({ data }) {
   const [geminiReport, setGeminiReport] = useState(null);
   const [loadingAi, setLoadingAi] = useState(false);
   const [aiError, setAiError] = useState(null);
+  const [geminiApiKey, setGeminiApiKey] = useState("");
 
   const profile = data?.profile;
   const videos = data?.videos || [];
@@ -166,9 +167,13 @@ export default function MetricsPage({ data }) {
     setLoadingAi(true);
     setAiError(null);
     try {
+      const headers = { "Content-Type": "application/json" };
+      const apiKey = geminiApiKey.trim();
+      if (apiKey) headers["X-Gemini-Api-Key"] = apiKey;
+
       const response = await fetch(`http://${getBackendHost()}:8000/api/ai/gemini-report`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           profile: profile || {},
           psychometrics: psychometrics || {},
@@ -177,10 +182,12 @@ export default function MetricsPage({ data }) {
       });
 
       if (!response.ok) {
-        throw new Error("No se pudo obtener la respuesta del servidor");
+        const errorResult = await response.json().catch(() => ({}));
+        throw new Error(errorResult.detail || "No se pudo obtener la respuesta del servidor");
       }
 
       const result = await response.json();
+      if (result.error) throw new Error(result.error);
       setGeminiReport(result);
     } catch (err) {
       setAiError(err.message || "Error al conectar con la API de Gemini");
@@ -843,14 +850,30 @@ export default function MetricsPage({ data }) {
                   </div>
                 </div>
 
-                <button
-                  onClick={handleGenerateGeminiReport}
-                  disabled={loadingAi}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition disabled:opacity-50 shadow-lg shadow-cyan-950/50 cursor-pointer shrink-0"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingAi ? "animate-spin" : ""}`} />
-                  <span>{loadingAi ? "Analizando con Gemini..." : geminiReport ? "Regenerar Auditoría" : "Generar Auditoría con Gemini"}</span>
-                </button>
+                <div className="flex flex-col sm:flex-row sm:items-end gap-3 sm:w-full sm:max-w-xl">
+                  <label className="flex-1 space-y-1.5">
+                    <span className="block text-[11px] font-semibold text-slate-300">API key de Gemini</span>
+                    <input
+                      type="password"
+                      value={geminiApiKey}
+                      onChange={(event) => setGeminiApiKey(event.target.value)}
+                      placeholder="Pega aquí tu API key"
+                      autoComplete="new-password"
+                      spellCheck={false}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
+                      aria-label="API key de Gemini"
+                    />
+                    <span className="block text-[10px] text-slate-500">Solo queda en memoria mientras esta página está abierta. Se envía al backend; evita usarla en redes compartidas sin HTTPS.</span>
+                  </label>
+                  <button
+                    onClick={handleGenerateGeminiReport}
+                    disabled={loadingAi}
+                    className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs transition disabled:opacity-50 shadow-lg shadow-cyan-950/50 cursor-pointer shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingAi ? "animate-spin" : ""}`} />
+                    <span>{loadingAi ? "Analizando con Gemini..." : geminiReport ? "Regenerar Auditoría" : "Generar Auditoría con Gemini"}</span>
+                  </button>
+                </div>
               </div>
 
               {aiError && (

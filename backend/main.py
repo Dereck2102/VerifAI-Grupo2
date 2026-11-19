@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Response, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -196,13 +196,6 @@ async def websocket_scrape_endpoint(websocket: WebSocket):
             pass
 
 
-gemini_service = None
-try:
-    gemini_service = GeminiAuditService()
-except Exception as e:
-    print(f"[WARN] Gemini no inicializado: {e}")
-
-
 class GeminiReportRequest(BaseModel):
     profile: dict
     psychometrics: dict
@@ -210,11 +203,18 @@ class GeminiReportRequest(BaseModel):
 
 
 @app.post("/api/ai/gemini-report")
-def get_gemini_report_endpoint(payload: GeminiReportRequest):
-    if not gemini_service:
-        return {"error": "Servicio de Gemini no configurado en el servidor"}
-    
-    return gemini_service.generate_creator_report(
+def get_gemini_report_endpoint(
+    payload: GeminiReportRequest,
+    x_gemini_api_key: Optional[str] = Header(default=None, alias="X-Gemini-Api-Key"),
+):
+    try:
+        service = GeminiAuditService(api_key=x_gemini_api_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return service.generate_creator_report(
         profile=payload.profile,
         psychometrics=payload.psychometrics,
         frequency=payload.frequency

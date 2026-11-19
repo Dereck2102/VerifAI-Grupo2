@@ -2,7 +2,7 @@ import os
 import json
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 try:
     from google import genai
     from google.genai import types
@@ -19,13 +19,17 @@ env_path = backend_dir / ".env"
 load_dotenv(dotenv_path=env_path)
 
 class GeminiAuditService:
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
         if not GENAI_AVAILABLE:
             raise RuntimeError("El paquete 'google-genai' no está instalado en el entorno.")
-        api_key = os.getenv("GOOGLE_API_KEY")
+        api_key = (api_key or "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
         if not api_key:
-            raise ValueError(f"Falta GOOGLE_API_KEY en {env_path}")
+            raise ValueError(
+                "Ingresa una API key de Gemini en la interfaz o configura "
+                "GOOGLE_API_KEY en backend/.env."
+            )
         
+        self._api_key = api_key
         self.client = genai.Client(api_key=api_key)
         
         # Lista priorizada de modelos disponibles en tu proyecto
@@ -90,7 +94,7 @@ class GeminiAuditService:
 
                 except Exception as e:
                     last_error = e
-                    err_msg = str(e)
+                    err_msg = self._redact_api_key(str(e))
                     print(f"[WARN] Fallo con modelo {model} (intento {attempt+1}): {err_msg}")
                     
                     # Si el error es saturación temporal (503 / UNAVAILABLE), espera brevemente y reintenta
@@ -102,10 +106,15 @@ class GeminiAuditService:
                         break
 
         # Si todos los modelos candidatos fallan
-        print(f"[GEMINI API CRITICAL ERROR] Todos los modelos saturados: {last_error}")
+        safe_error = self._redact_api_key(str(last_error))
+        print(f"[GEMINI API CRITICAL ERROR] Todos los modelos candidatos fallaron: {safe_error}")
         return {
-            "error": str(last_error),
+            "error": safe_error,
             "diagnostico_perfil": "Los servidores de Google reportan alta demanda momentánea. Por favor, reintenta en unos segundos.",
             "estrategia_monetizacion": "Intenta regenerar la auditoría con el botón superior.",
             "consejo_mejora": "Reintentar la petición."
         }
+
+    def _redact_api_key(self, message: str) -> str:
+        """Evita que errores del proveedor puedan devolver la credencial al cliente."""
+        return message.replace(self._api_key, "[REDACTED]") if self._api_key else message
