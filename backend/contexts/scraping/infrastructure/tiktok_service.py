@@ -1,557 +1,384 @@
-﻿import os
-import time
+﻿"""Unified Playwright-based TikTok scraping service with async execution and no-login support."""
+
+from __future__ import annotations
+
 import asyncio
 import json
+import random
 import re
-from typing import Callable, Optional, Dict, Any, List
-from playwright.sync_api import sync_playwright
+import time
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Optional, Dict, List
 
-class TikTokScraperService:
-    def __init__(self, log_callback: Optional[Callable[[str], Any]] = None):
-        self.log_callback = log_callback
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response, async_playwright
 
-    def _sync_log(self, message: str, loop: asyncio.AbstractEventLoop):
-        if self.log_callback and loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.log_callback(message), loop)
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+PERFIL_NAVEGADOR_DIR = BASE_DIR / "tiktok_browser_profile"
 
-    def _format_number(self, num: Any) -> str:
+USER_AGENTS: dict[str, str] = {
+    "chrome_windows": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "chrome_mac": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "edge_windows": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0"
+    ),
+}
+
+MODOS: tuple[str, ...] = ("hibrido", "red", "dom", "rapido")
+
+SELECTOR_POST = '[data-e2e="user-post-item"]'
+SELECTOR_HIDRATACION = "script#__UNIVERSAL_DATA_FOR_REHYDRATION__"
+SELECTORES_CAPTCHA: tuple[str, ...] = (
+    "#captcha-verify-container-main-page",
+    "#captcha_container",
+    "div[class*='captcha_verify']",
+    "div[class*='CaptchaVerify']",
+)
+
+JS_LEER_DOM = """
+(sel) => Array.from(document.querySelectorAll(sel)).map(el => {
+    const a = el.querySelector('a');
+    const v = el.querySelector('[data-e2e="video-views"]') || el.querySelector('strong');
+    const img = el.querySelector('img');
+    const descEl = el.querySelector('[title], a');
+    return {
+        href: a ? a.href : null,
+        vistas: v ? v.innerText.trim() : null,
+        alt: img ? img.getAttribute('alt') : null,
+        portada: img ? img.getAttribute('src') : null,
+        desc: descEl ? (descEl.getAttribute('title') || descEl.innerText || '') : '',
+        fijado: !!el.querySelector('[data-e2e="video-card-badge"]'),
+    };
+})
+"""
+
+
+@dataclass(frozen=True)
+class ScrapeOptions:
+    """Configuración para la ejecución del scraping de perfiles."""
+    modo: str = "hibrido"
+    max_scrolls: int = 5
+    max_posts: int = 19
+    scroll_delay_ms: int = 1800
+    headless: bool = True
+    bloquear_multimedia: bool = True
+    sesion_persistente: bool = False
+    humanizar: bool = True
+    detener_sin_nuevos: int = 3
+    fecha_desde: Optional[str] = None
+    user_agent: str = "chrome_windows"
+    timeout_carga_s: int = 25
+    reintentos: int = 2
+    max_comment_videos: int = 2
+    max_following: int = 20
+    max_followers: int = 20
+
+    @classmethod
+    def desde_dict(cls, data: Optional[dict[str, Any]]) -> ScrapeOptions:
+        raw = data or {}
+
+        def _parse_int(key: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                return max(minimum, min(int(raw.get(key, default)), maximum))
+            except (TypeError, ValueError):
+                return default
+
+        def _parse_bool(key: str, default: bool) -> bool:
+            val = raw.get(key, default)
+            if isinstance(val, str):
+                return val.lower() in ("1", "true", "on", "si", "sí", "yes")
+            return bool(val)
+
+        modo = raw.get("modo", "hibrido")
+        return cls(
+            modo=modo if modo in MODOS else "hibrido",
+            max_scrolls=_parse_int("max_scrolls", 5, 0, 100),
+            max_posts=_parse_int("max_posts", _parse_int("max_videos", 19, 1, 500), 1, 5000),
+            scroll_delay_ms=_parse_int("scroll_delay_ms", 1800, 400, 15000),
+            headless=_parse_bool("headless", True),
+            bloquear_multimedia=_parse_bool("bloquear_multimedia", True),
+            sesion_persistente=_parse_bool("sesion_persistente", False),
+            humanizar=_parse_bool("humanizar", True),
+            detener_sin_nuevos=_parse_int("detener_sin_nuevos", 3, 1, 30),
+            fecha_desde=(raw.get("fecha_desde") or "").strip() or None,
+            user_agent=raw.get("user_agent", "chrome_windows"),
+            timeout_carga_s=_parse_int("timeout_carga_s", 25, 5, 120),
+            reintentos=_parse_int("reintentos", 1, 0, 4),
+            max_comment_videos=_parse_int("max_comment_videos", 2, 0, 10),
+            max_following=_parse_int("max_following", 20, 0, 100),
+            max_followers=_parse_int("max_followers", 20, 0, 100)
+        )
+
+
+class TikTokDataParser:
+    """Normaliza y estructura datos extraídos tanto de la API de TikTok como del DOM."""
+
+    @staticmethod
+    def format_number(val: Any) -> str:
         try:
-            val = int(num)
-            if val < 0:
-                val = val + 4294967296
-            if val >= 1_000_000_000:
-                return f"{round(val / 1_000_000_000, 1)}B"
-            if val >= 1_000_000:
-                return f"{round(val / 1_000_000, 1)}M"
-            if val >= 1_000:
-                return f"{round(val / 1_000, 1)}K"
-            return str(val)
-        except Exception:
+            num = int(val)
+            if num < 0:
+                num = num + 4294967296
+            if num >= 1_000_000_000:
+                return f"{round(num / 1_000_000_000, 1)}B"
+            if num >= 1_000_000:
+                return f"{round(num / 1_000_000, 1)}M"
+            if num >= 1_000:
+                return f"{round(num / 1_000, 1)}K"
             return str(num)
-
-    def _get_safe_content(self, page, retries: int = 4, delay: float = 2.0) -> str:
-        for attempt in range(retries):
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=12000)
-                time.sleep(delay)
-                return page.content()
-            except Exception:
-                time.sleep(delay)
-        try:
-            return page.content()
         except Exception:
-            return ""
+            return str(val or "0")
 
-    def _safe_goto(self, page, target_url: str, loop: asyncio.AbstractEventLoop, timeout: int = 35000) -> bool:
-        for attempt in range(2):
-            try:
-                page.goto(target_url, wait_until="commit", timeout=timeout)
-                time.sleep(3.5)
-                return True
-            except Exception as e:
-                self._sync_log(f"[WARN] Reintentando carga ({attempt + 1}/2): {str(e)}", loop)
-                time.sleep(2)
+    @staticmethod
+    def parse_count(value: Any) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip().upper().replace(" ", "")
+        if not text:
+            return None
+        mult = 1
+        if text.endswith("K"):
+            mult, text = 1_000, text[:-1]
+        elif text.endswith("M"):
+            mult, text = 1_000_000, text[:-1]
+        elif text.endswith("B"):
+            mult, text = 1_000_000_000, text[:-1]
+        text = text.replace(",", ".")
+        if text.count(".") > 1:
+            text = text.replace(".", "")
         try:
-            page.reload(wait_until="commit", timeout=20000)
-            time.sleep(3)
-            return True
-        except Exception:
-            return False
-
-    def _parse_tiktok_item(self, item: Dict[str, Any], clean_user: str, target_sec_uid: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        if not isinstance(item, dict):
-            return None
-        if item.get("isStory") is True or "story" in str(item.get("itemType", "")).lower() or "story" in item:
+            return int(float(text) * mult)
+        except ValueError:
             return None
 
-        author = item.get("author")
-        if isinstance(author, dict):
-            u_id = author.get("uniqueId", "")
-            s_uid = author.get("secUid", "")
-            if target_sec_uid and s_uid and s_uid != target_sec_uid:
-                return None
-            if u_id and u_id.lower() != clean_user.lower():
-                return None
-        elif isinstance(author, str) and author:
-            if author.lower() != clean_user.lower():
-                return None
-
-        vid_id = str(item.get("id", ""))
-        if not vid_id.isdigit():
+    @classmethod
+    def to_int(cls, value: Any) -> Optional[int]:
+        if value is None or value == "":
             return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return cls.parse_count(value)
 
-        v_info = item.get("video", {})
-        if not isinstance(v_info, dict):
-            return None
+    @staticmethod
+    def extract_hashtags(item: dict[str, Any], description: str) -> list[str]:
+        tags: list[str] = []
+        for extra in item.get("textExtra") or []:
+            name = extra.get("hashtagName")
+            if name:
+                tags.append(name.lower())
+        if not tags:
+            for challenge in item.get("challenges") or []:
+                if challenge.get("title"):
+                    tags.append(challenge["title"].lower())
+        if not tags and description:
+            tags = [h.lower() for h in re.findall(r"#([\w\ñ\Ñ]+)", description)]
+        return list(dict.fromkeys(tags))
 
-        stats_v2 = item.get("statsV2", {})
-        stats = item.get("stats", {})
+    @staticmethod
+    def extract_mentions(item: dict[str, Any], description: str) -> list[str]:
+        mentions = [
+            extra.get("userUniqueId")
+            for extra in item.get("textExtra") or []
+            if extra.get("userUniqueId")
+        ]
+        if not mentions and description:
+            mentions = re.findall(r"@([\w.]+)", description)
+        return list(dict.fromkeys(mentions))
 
-        plays = int(stats_v2.get("playCount") or stats.get("playCount") or 0)
-        likes = int(stats_v2.get("diggCount") or stats.get("diggCount") or 0)
-        comments = int(stats_v2.get("commentCount") or stats.get("commentCount") or 0)
-        shares = int(stats_v2.get("shareCount") or stats.get("shareCount") or 0)
+    @classmethod
+    def parse_api_item(cls, item: dict[str, Any], username: str) -> dict[str, Any]:
+        video_id = str(item.get("id", ""))
+        ts = cls.to_int(item.get("createTime")) or 0
+        desc = item.get("desc", "") or ""
+        stats = item.get("stats") or {}
+        stats_v2 = item.get("statsV2") or {}
+        video = item.get("video") or {}
+        music = item.get("music") or {}
+        is_photo = bool(item.get("imagePost"))
+
+        def _stat(key: str) -> int:
+            val = cls.to_int(stats_v2.get(key))
+            if val is not None:
+                return val
+            return cls.to_int(stats.get(key)) or 0
+
+        plays = _stat("playCount")
+        likes = _stat("diggCount")
+        comments = _stat("commentCount")
+        shares = _stat("shareCount")
+        collects = _stat("collectCount")
 
         cover = (
-            v_info.get("cover")
-            or v_info.get("originCover")
-            or v_info.get("dynamicCover")
+            video.get("cover")
+            or video.get("originCover")
+            or video.get("dynamicCover")
             or "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80"
         )
 
+        duration_sec = cls.to_int(video.get("duration")) or 15
+
         return {
-            "vid_id": vid_id,
-            "url": f"https://www.tiktok.com/@{clean_user}/video/{vid_id}",
-            "thumbnail": cover,
-            "views": self._format_number(plays),
-            "likes": self._format_number(likes),
-            "shares": self._format_number(shares),
-            "comments_count": self._format_number(comments),
-            "duration": f"{v_info.get('duration', 15)}s",
-            "desc": item.get("desc", ""),
-            "create_time": item.get("createTime", 0),
-            "raw_plays": plays,
-            "raw_interactions": likes + comments + shares
-        }
-
-    def _run_sync_scrape(
-        self,
-        username: str,
-        target: str,
-        loop: asyncio.AbstractEventLoop,
-        max_videos: int = 19,
-        max_comment_videos: int = 2,
-        max_following: int = 20,
-        max_followers: int = 20
-    ) -> Dict[str, Any]:
-        clean_user = username.replace("@", "").strip()
-        url = f"https://www.tiktok.com/@{clean_user}"
-
-        results: Dict[str, Any] = {
-            "profile": {
-                "name": clean_user,
-                "username": f"@{clean_user}",
-                "bio": "",
-                "followers": "0",
-                "likes": "0",
-                "videosCount": "0",
-                "engagement": "N/A",
-                "avgViews": "N/A"
+            "id": video_id,
+            "vid_id": video_id,
+            "descripcion": desc,
+            "desc": desc,
+            "timestamp": ts,
+            "create_time": ts,
+            "fecha": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else None,
+            "url": f"https://www.tiktok.com/@{username}/{'photo' if is_photo else 'video'}/{video_id}",
+            "tipo": "foto" if is_photo else "video",
+            "duracion": duration_sec,
+            "duration": f"{duration_sec}s",
+            "fijado": bool(item.get("isPinnedItem") or item.get("isPinned")),
+            "hashtags": cls.extract_hashtags(item, desc),
+            "menciones": cls.extract_mentions(item, desc),
+            "musica": {
+                "titulo": music.get("title"),
+                "autor": music.get("authorName"),
+                "original": bool(music.get("original")),
             },
-            "videos": [],
-            "comments": [],
-            "followers_list": [],
-            "following_list": []
+            "portada": cover,
+            "thumbnail": cover,
+            "views": cls.format_number(plays),
+            "likes": cls.format_number(likes),
+            "shares": cls.format_number(shares),
+            "comments_count": cls.format_number(comments),
+            "raw_plays": plays,
+            "raw_interactions": likes + comments + shares + collects,
+            "estadisticas": {
+                "vistas": plays,
+                "likes": likes,
+                "comentarios": comments,
+                "compartidos": shares,
+                "guardados": collects,
+            },
+            "fuente": "api",
         }
 
-        captured_map: Dict[str, Dict[str, Any]] = {}
-        captured_comments: List[Dict[str, Any]] = []
-        captured_followers: List[Dict[str, Any]] = []
-        captured_following: List[Dict[str, Any]] = []
+    @classmethod
+    def parse_dom_item(cls, raw: dict[str, Any], username: str) -> Optional[dict[str, Any]]:
+        href = raw.get("href") or ""
+        match = re.search(r"/(video|photo)/(\d+)", href)
+        if not match:
+            return None
+        video_id = match.group(2)
+        desc = raw.get("desc") or raw.get("alt") or ""
+        plays = cls.parse_count(raw.get("vistas")) or 0
+        cover = raw.get("portada") or "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80"
 
-        current_inspecting_vid: Optional[str] = None
-        sec_uid: Optional[str] = None
-        active_phase: Optional[str] = None
+        return {
+            "id": video_id,
+            "vid_id": video_id,
+            "descripcion": desc,
+            "desc": desc,
+            "timestamp": 0,
+            "create_time": 0,
+            "fecha": None,
+            "url": href.split("?")[0] if href else f"https://www.tiktok.com/@{username}/video/{video_id}",
+            "tipo": "foto" if match.group(1) == "photo" else "video",
+            "duracion": 15,
+            "duration": "15s",
+            "fijado": bool(raw.get("fijado")),
+            "hashtags": list(dict.fromkeys(h.lower() for h in re.findall(r"#([\w\ñ\Ñ]+)", desc))),
+            "menciones": [],
+            "musica": {"titulo": None, "autor": None, "original": None},
+            "portada": cover,
+            "thumbnail": cover,
+            "views": cls.format_number(plays),
+            "likes": "0",
+            "shares": "0",
+            "comments_count": "0",
+            "raw_plays": plays,
+            "raw_interactions": 0,
+            "estadisticas": {
+                "vistas": plays,
+                "likes": 0,
+                "comentarios": 0,
+                "compartidos": 0,
+                "guardados": 0,
+            },
+            "fuente": "dom",
+        }
 
-        def on_response(response):
-            nonlocal current_inspecting_vid, active_phase
-            req_url = response.url
+    @classmethod
+    def parse_profile(cls, user_detail: dict[str, Any], fallback_user: str) -> dict[str, Any]:
+        info = user_detail.get("userInfo") or {}
+        user = info.get("user") or {}
+        stats = info.get("statsV2") or info.get("stats") or {}
+        stats_v1 = info.get("stats") or {}
 
-            # 1. Videos (Intercepta respuestas de catÃ¡logo con estadÃ­sticas completas)
-            if "/api/post/item_list" in req_url:
-                try:
-                    text_body = response.text()
-                    if text_body:
-                        data = json.loads(text_body)
-                        for item in data.get("itemList", []):
-                            parsed = self._parse_tiktok_item(item, clean_user, sec_uid)
-                            if parsed and parsed["vid_id"] not in captured_map:
-                                captured_map[parsed["vid_id"]] = parsed
-                except Exception:
-                    pass
+        def _stat(key: str, fallback: Optional[str] = None) -> Optional[int]:
+            val = cls.to_int(stats.get(key))
+            if val is None and fallback:
+                val = cls.to_int(stats.get(fallback))
+            if val is None:
+                val = cls.to_int(stats_v1.get(key)) or (
+                    cls.to_int(stats_v1.get(fallback)) if fallback else None
+                )
+            return val
 
-            # 2. Comentarios (Intercepta llamadas al abrir el modal de video)
-            if "/api/comment/list" in req_url or "comment/list" in req_url:
-                try:
-                    text_body = response.text()
-                    if text_body:
-                        data = json.loads(text_body)
-                        for comm in data.get("comments", []):
-                            c_id = str(comm.get("cid", ""))
-                            if c_id and not any(c["id"] == c_id for c in captured_comments):
-                                u = comm.get("user", {})
-                                raw_uid = u.get("unique_id") or u.get("uniqueId") or "anÃ³nimo"
-                                captured_comments.append({
-                                    "id": c_id,
-                                    "video_id": current_inspecting_vid or "N/A",
-                                    "video_url": f"https://www.tiktok.com/@{clean_user}/video/{current_inspecting_vid}" if current_inspecting_vid else url,
-                                    "author": f"@{raw_uid.lstrip('@')}",
-                                    "author_name": u.get("nickname") or raw_uid,
-                                    "avatar": u.get("avatar_thumb", {}).get("url_list", [""])[0] if isinstance(u.get("avatar_thumb"), dict) else "",
-                                    "text": comm.get("text") or "",
-                                    "likes": self._format_number(comm.get("digg_count", 0)),
-                                    "date": time.strftime("%Y-%m-%d", time.localtime(comm.get("create_time", time.time())))
-                                })
-                except Exception:
-                    pass
+        raw_followers = _stat("followerCount") or 0
+        raw_likes = _stat("heartCount", "heart") or 0
+        raw_following = _stat("followingCount") or 0
+        raw_videos = _stat("videoCount") or 0
 
-            # 3. Interceptor de relaciones (Siguiendo y Seguidores)
-            if any(k in req_url for k in ["/api/user/list", "/follower/list", "/following/list", "/fans/list"]):
-                try:
-                    text_body = response.text()
-                    if not text_body:
-                        return
-                    data = json.loads(text_body)
-                    items = data.get("userList") or data.get("minisets") or data.get("followers") or []
-                    if not items:
-                        return
+        uname = user.get("uniqueId") or fallback_user
+        name = user.get("nickname") or uname
+        bio = user.get("signature") or ""
+        avatar = user.get("avatarLarger") or user.get("avatarMedium") or user.get("avatarThumb") or ""
 
-                    is_follower = (active_phase == "followers")
-                    target_list = captured_followers if is_follower else captured_following
-                    current_limit = max_followers if is_follower else max_following
+        return {
+            "id": user.get("id"),
+            "usuario": uname,
+            "username": f"@{uname.lstrip('@')}",
+            "nombre": name,
+            "name": name,
+            "bio": bio,
+            "avatar": avatar,
+            "verificado": bool(user.get("verified")),
+            "privada": bool(user.get("privateAccount")),
+            "enlace_bio": (user.get("bioLink") or {}).get("link"),
+            "region": user.get("region"),
+            "seguidores": raw_followers,
+            "followers": cls.format_number(raw_followers),
+            "siguiendo": raw_following,
+            "likes_totales": raw_likes,
+            "likes": cls.format_number(raw_likes),
+            "videos": raw_videos,
+            "videosCount": str(raw_videos),
+            "amigos": _stat("friendCount") or 0,
+            "engagement": "N/A",
+            "avgViews": "N/A"
+        }
 
-                    for f in items:
-                        if len(target_list) >= current_limit:
-                            break
-                        user_data = f.get("user", f) if isinstance(f, dict) else {}
-                        raw_uid = user_data.get("uniqueId") or user_data.get("unique_id", "")
-                        if raw_uid:
-                            uname = f"@{raw_uid.lstrip('@')}"
-                            if not any(u["username"] == uname for u in target_list):
-                                avatar = user_data.get("avatarThumb") or user_data.get("avatar_thumb", "")
-                                if isinstance(avatar, dict):
-                                    avatar = avatar.get("url_list", [""])[0]
-                                target_list.append({
-                                    "username": uname,
-                                    "name": user_data.get("nickname", "") or raw_uid,
-                                    "avatar": avatar or ""
-                                })
-                except Exception:
-                    pass
 
-        self._sync_log("[INIT] Iniciando sesiÃ³n segura de Playwright...", loop)
-        user_data_dir = os.path.join(os.getcwd(), "tiktok_edge_profile")
+class TikTokScraperService:
+    """Servicio completo de extracción con Playwright async, soporte sin login y streaming."""
 
-        with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                channel="msedge",
-                headless=False,
-                viewport={"width": 1366, "height": 850},
-                ignore_default_args=["--enable-automation"],
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--mute-audio"
-                ]
-            )
+    def __init__(self, log_callback: Optional[Callable[[str], Any]] = None):
+        self.log_callback = log_callback
+        self.parser = TikTokDataParser()
 
-            auth_path = os.path.join(os.getcwd(), "auth.json")
-            if os.path.exists(auth_path):
-                try:
-                    with open(auth_path, "r", encoding="utf-8") as f:
-                        auth_data = json.load(f)
-                    if "cookies" in auth_data and auth_data["cookies"]:
-                        context.add_cookies(auth_data["cookies"])
-                except Exception:
-                    pass
-
-            page = context.pages[0] if context.pages else context.new_page()
-            page.on("response", on_response)
-
-            self._sync_log(f"[NETWORK] Accediendo a @{clean_user}...", loop)
-            self._safe_goto(page, url, loop)
-
-            # Extraer Cabecera del perfil
-            raw_html = self._get_safe_content(page)
-            match = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', raw_html, re.DOTALL)
-            if match:
-                try:
-                    rehyd_data = json.loads(match.group(1))
-                    user_info = rehyd_data.get("__DEFAULT_SCOPE__", {}).get("webapp.user-detail", {}).get("userInfo", {})
-                    user_obj = user_info.get("user", {})
-                    stats_obj = user_info.get("stats", {}) or user_info.get("statsV2", {})
-                    if user_obj:
-                        sec_uid = user_obj.get("secUid")
-                        results["profile"]["name"] = user_obj.get("nickname") or clean_user
-                        results["profile"]["bio"] = user_obj.get("signature") or ""
-                    if stats_obj:
-                        results["profile"]["followers"] = self._format_number(stats_obj.get("followerCount", 0))
-                        raw_hearts = stats_obj.get("heart") or stats_obj.get("heartCount") or 0
-                        results["profile"]["likes"] = self._format_number(raw_hearts)
-                except Exception:
-                    pass
-
-            # --- PARTE 1: VIDEOS (SCROLL ADAPTATIVO AL LÃMITE) ---
-            self._sync_log(f"[VIDEOS] Escaneando publicaciones (lÃ­mite: {max_videos})...", loop)
-            scroll_passes = max(2, int(max_videos / 4))
-            for _ in range(scroll_passes):
-                if len(captured_map) >= max_videos:
-                    break
-                page.mouse.wheel(0, 900)
-                time.sleep(1.2)
-
-            dom_cards = page.evaluate("""(cleanUser) => {
-                const results = [];
-                const seen = new Set();
-                const links = Array.from(document.querySelectorAll('[data-e2e="user-post-item"] a, a[href*="/video/"]'));
-                for (const a of links) {
-                    const href = a.href || '';
-                    if (!href.includes('/video/') || href.includes('/story/')) continue;
-                    const match = href.match(/\\/video\\/(\\d+)/);
-                    if (!match) continue;
-                    const vidId = match[1];
-                    if (seen.has(vidId)) continue;
-                    seen.add(vidId);
-                    const card = a.closest('[data-e2e="user-post-item"]') || a.parentElement?.parentElement || a;
-                    const img = card ? card.querySelector('img') : null;
-                    const viewsEl = card ? (card.querySelector('[data-e2e="video-views"]') || card.querySelector('strong')) : null;
-                    const descEl = card ? card.querySelector('[title], a') : null;
-                    const textDesc = descEl ? (descEl.getAttribute('title') || descEl.innerText || '') : '';
-                    results.push({
-                        vid_id: vidId,
-                        url: `https://www.tiktok.com/@${cleanUser}/video/${vidId}`,
-                        thumbnail: img ? (img.src || '') : '',
-                        views: viewsEl ? viewsEl.innerText.trim() : 'Ver video',
-                        desc: textDesc
-                    });
-                }
-                return results;
-            }""", clean_user)
-
-            for d in dom_cards:
-                vid_id = d["vid_id"]
-                if vid_id not in captured_map:
-                    captured_map[vid_id] = {
-                        "vid_id": vid_id,
-                        "url": d["url"],
-                        "thumbnail": d["thumbnail"],
-                        "views": d["views"],
-                        "likes": "0",
-                        "shares": "0",
-                        "comments_count": "0",
-                        "duration": "15s",
-                        "desc": d.get("desc", ""),
-                        "create_time": 0,
-                        "raw_plays": 0,
-                        "raw_interactions": 0
-                    }
-
-            # --- PARTE 2: COMENTARIOS MEDIANTE CLIC EN MODAL (SIN GOTO EXTERNO) ---
-            if target in ["all", "comments"] and max_comment_videos > 0:
-                self._sync_log(f"[COMMENTS] Inspeccionando comentarios de {max_comment_videos} video(s) vÃ­a modal...", loop)
-                page.evaluate("window.scrollTo(0, 400)")
-                time.sleep(1)
-
-                video_cards = page.locator('[data-e2e="user-post-item"]').all()
-                processed_count = 0
-
-                for idx, card in enumerate(video_cards):
-                    if processed_count >= max_comment_videos:
-                        break
-                    try:
-                        link = card.locator('a[href*="/video/"]').first
-                        href = link.get_attribute("href") if link.count() > 0 else ""
-                        match_vid = re.search(r'/video/(\d+)', href or "")
-                        current_inspecting_vid = match_vid.group(1) if match_vid else f"video_{idx + 1}"
-
-                        card.click(timeout=8000)
-                        time.sleep(2.5)
-
-                        page.mouse.move(1050, 450)
-                        for _ in range(4):
-                            page.mouse.wheel(0, 450)
-                            time.sleep(0.8)
-
-                        dom_comments = page.evaluate("""(vidId) => {
-                            const list = [];
-                            const items = document.querySelectorAll('[data-e2e="comment-level-1"], [class*="DivCommentItemContainer"]');
-                            for (const item of items) {
-                                const userEl = item.querySelector('a[href*="/@"], [data-e2e="comment-user-username"], span[class*="SpanUserName"]');
-                                const textEl = item.querySelector('[data-e2e="comment-level-1"] span, p[class*="PCommentText"], span[class*="SpanCommentText"]');
-                                const likeEl = item.querySelector('[data-e2e="comment-like-count"]');
-                                const imgEl = item.querySelector('img');
-                                const rawUser = userEl ? (userEl.innerText || '').trim() : '';
-                                const commText = textEl ? (textEl.innerText || '').trim() : '';
-                                if (rawUser && commText) {
-                                    list.push({
-                                        id: `${vidId}_${list.length + 1}`,
-                                        video_id: vidId,
-                                        author: `@${rawUser.replace(/^@/, '')}`,
-                                        author_name: rawUser,
-                                        avatar: imgEl ? (imgEl.src || '') : '',
-                                        text: commText,
-                                        likes: likeEl ? (likeEl.innerText || '0').trim() : '0',
-                                        date: new Date().toISOString().split('T')[0]
-                                    });
-                                }
-                            }
-                            return list;
-                        }""", current_inspecting_vid)
-
-                        for c in dom_comments:
-                            if not any(x["text"] == c["text"] and x["author"] == c["author"] for x in captured_comments):
-                                captured_comments.append(c)
-
-                        processed_count += 1
-                        self._sync_log(f"[COMMENTS] Video {processed_count}/{max_comment_videos}: acumulados {len(captured_comments)} comentarios.", loop)
-
-                        page.keyboard.press("Escape")
-                        time.sleep(1.5)
-
-                    except Exception as e:
-                        self._sync_log(f"[WARN] Error revisando tarjeta {idx + 1}: {str(e)}", loop)
-                        page.keyboard.press("Escape")
-                        time.sleep(1)
-
-            # --- PARTE 3: GESTIÃ“N DE RELACIONES (SIGUIENDO Y SEGUIDORES CON LÃMITES) ---
-            if target in ["all", "relations", "followers"] and (max_following > 0 or max_followers > 0):
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(1)
-
-                def extract_modal_rows() -> List[Dict[str, str]]:
-                    return page.evaluate("""() => {
-                        const items = [];
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        for (const btn of buttons) {
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.left < 380 || rect.left > 1050 || rect.top < 150 || rect.height === 0) continue;
-                            const bTxt = (btn.innerText || '').trim().toLowerCase();
-                            if (!['seguir', 'follow', 'siguiendo', 'following', 'amigos', 'friends'].includes(bTxt)) continue;
-
-                            const row = btn.closest('li') || btn.parentElement?.parentElement || btn.parentElement;
-                            if (!row) continue;
-
-                            const img = row.querySelector('img');
-                            const lines = (row.innerText || '').split('\\n').map(s => s.trim()).filter(s => s && s.toLowerCase() !== bTxt);
-                            if (lines.length >= 2) {
-                                const rawHandle = lines[1].replace(/^@/, '').trim();
-                                if (rawHandle && !rawHandle.includes(' ')) {
-                                    items.push({
-                                        username: `@${rawHandle}`,
-                                        name: lines[0],
-                                        avatar: img ? (img.src || '') : ''
-                                    });
-                                }
-                            }
-                        }
-                        return items;
-                    }""")
-
-                def scroll_modal_list(repeats: int = 4):
-                    page.mouse.move(683, 480)
-                    for _ in range(repeats):
-                        page.mouse.wheel(0, 450)
-                        time.sleep(1)
-
-                # 1. Siguiendo
-                if max_following > 0:
-                    self._sync_log(f"[RELATIONS] [1/2] Abriendo pestaÃ±a Siguiendo (mÃ¡x: {max_following})...", loop)
-                    active_phase = "following"
-                    try:
-                        following_btn = page.query_selector('[data-e2e="following"], [data-e2e="following-count"]')
-                        if following_btn:
-                            following_btn.click()
-                            time.sleep(2.5)
-                            scroll_modal_list(max(2, int(max_following / 5)))
-
-                            if len(captured_following) < max_following:
-                                for u in extract_modal_rows():
-                                    if len(captured_following) >= max_following:
-                                        break
-                                    if not any(x["username"] == u["username"] for x in captured_following):
-                                        captured_following.append(u)
-
-                        self._sync_log(f"[RELATIONS] Siguiendo obtenidos: {len(captured_following)}.", loop)
-                    except Exception as e:
-                        self._sync_log(f"[WARN] Error en Siguiendo: {str(e)}", loop)
-
-                # 2. Seguidores
-                if max_followers > 0:
-                    self._sync_log(f"[RELATIONS] [2/2] Cambiando a pestaÃ±a Seguidores (mÃ¡x: {max_followers})...", loop)
-                    active_phase = "followers"
-                    try:
-                        clicked_followers_tab = page.evaluate("""() => {
-                            const tabs = Array.from(document.querySelectorAll('div, p, span, button'));
-                            for (const t of tabs) {
-                                const r = t.getBoundingClientRect();
-                                if (r.left > 400 && r.left < 850 && r.top > 160 && r.top < 300 && r.height < 50) {
-                                    const txt = (t.innerText || '').trim().toLowerCase();
-                                    if (txt.startsWith('seguidores') || txt.startsWith('followers')) {
-                                        t.click();
-                                        return true;
-                                    }
-                                }
-                            }
-                            return false;
-                        }""")
-
-                        if clicked_followers_tab:
-                            time.sleep(3)
-                        else:
-                            page.mouse.click(550, 230)
-                            time.sleep(3)
-
-                        scroll_modal_list(max(2, int(max_followers / 4)))
-
-                        following_usernames = {u["username"] for u in captured_following}
-                        for u in extract_modal_rows():
-                            if len(captured_followers) >= max_followers:
-                                break
-                            if u["username"] not in following_usernames and not any(x["username"] == u["username"] for x in captured_followers):
-                                captured_followers.append(u)
-
-                        self._sync_log(f"[RELATIONS] Seguidores obtenidos: {len(captured_followers)}.", loop)
-
-                    except Exception as e:
-                        self._sync_log(f"[WARN] Error en Seguidores: {str(e)}", loop)
-
-                page.keyboard.press("Escape")
-                time.sleep(1)
-                active_phase = None
-
-            context.close()
-
-        # Consolidar resultados finales con descripciÃ³n, fecha, likes y shares individuales
-        final_videos = list(captured_map.values())[:max_videos]
-        total_plays = sum(v.get("raw_plays", 0) for v in final_videos)
-        total_interactions = sum(v.get("raw_interactions", 0) for v in final_videos)
-
-        for idx, vid in enumerate(final_videos):
-            results["videos"].append({
-                "id": idx + 1,
-                "url": vid["url"],
-                "thumbnail": vid["thumbnail"],
-                "views": vid["views"],
-                "likes": vid.get("likes", "0"),
-                "shares": vid.get("shares", "0"),
-                "comments_count": vid.get("comments_count", "0"),
-                "duration": vid["duration"],
-                "desc": vid.get("desc", ""),
-                "create_time": vid.get("create_time", 0)
-            })
-
-        results["comments"] = captured_comments
-        results["followers_list"] = captured_followers[:max_followers]
-        results["following_list"] = captured_following[:max_following]
-
-        v_count = len(results["videos"])
-        results["profile"]["videosCount"] = str(v_count)
-
-        if v_count > 0:
-            if total_plays > 0:
-                results["profile"]["avgViews"] = self._format_number(int(total_plays / v_count))
-                results["profile"]["engagement"] = f"{round((total_interactions / total_plays) * 100, 2)}%"
-            else:
-                results["profile"]["avgViews"] = results["videos"][0]["views"]
-                results["profile"]["engagement"] = "5.04%"
-
-        self._sync_log(
-            f"[SUCCESS] ExtracciÃ³n lista: {v_count} videos, {len(captured_comments)} comentarios, "
-            f"{len(results['followers_list'])} seguidores y {len(results['following_list'])} seguidos.",
-            loop
-        )
-        self._sync_log("[FINISHED] Proceso completado.", loop)
-        return results
+    async def _log(self, message: str) -> None:
+        if self.log_callback:
+            try:
+                res = self.log_callback(message)
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                pass
 
     async def scrape(
         self,
@@ -560,16 +387,311 @@ class TikTokScraperService:
         max_videos: int = 19,
         max_comment_videos: int = 2,
         max_following: int = 20,
-        max_followers: int = 20
+        max_followers: int = 20,
+        options_dict: Optional[dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        loop = asyncio.get_running_loop()
-        return await asyncio.to_thread(
-            self._run_sync_scrape,
-            username,
-            target,
-            loop,
-            max_videos,
-            max_comment_videos,
-            max_following,
-            max_followers
-        )
+        """Punto de entrada compatible con VerifAI que invoca el motor optimizado."""
+        clean_user = username.replace("@", "").strip()
+        opts = options_dict or {}
+        opts.setdefault("max_videos", max_videos)
+        opts.setdefault("max_comment_videos", max_comment_videos)
+        opts.setdefault("max_following", max_following)
+        opts.setdefault("max_followers", max_followers)
+        scrape_opts = ScrapeOptions.desde_dict(opts)
+
+        return await self._execute_scrape(clean_user, target, scrape_opts)
+
+    async def _execute_scrape(
+        self, username: str, target: str, options: ScrapeOptions
+    ) -> Dict[str, Any]:
+        start_time = time.time()
+        await self._log(f"[INIT] Configurando motor de extracción para @{username} (Modo: {options.modo})...")
+
+        posts_map: Dict[str, Dict[str, Any]] = {}
+        captured_comments: List[Dict[str, Any]] = []
+        captured_followers: List[Dict[str, Any]] = []
+        captured_following: List[Dict[str, Any]] = []
+
+        profile_data = {
+            "name": username,
+            "username": f"@{username}",
+            "bio": "",
+            "followers": "0",
+            "likes": "0",
+            "videosCount": "0",
+            "engagement": "N/A",
+            "avgViews": "N/A",
+            "avatar": ""
+        }
+
+        async with async_playwright() as playwright:
+            browser = None
+            context = None
+            try:
+                launch_args = [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--mute-audio"
+                ]
+
+                # Sesión sin login por defecto (contexto limpio)
+                # Si sesion_persistente está activada y existe directorio, la usa
+                if options.sesion_persistente:
+                    PERFIL_NAVEGADOR_DIR.mkdir(parents=True, exist_ok=True)
+                    context = await playwright.chromium.launch_persistent_context(
+                        str(PERFIL_NAVEGADOR_DIR),
+                        headless=options.headless,
+                        args=launch_args,
+                        user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
+                        viewport={"width": 1280, "height": 850}
+                    )
+                else:
+                    browser = await playwright.chromium.launch(
+                        headless=options.headless,
+                        args=launch_args
+                    )
+                    context = await browser.new_context(
+                        user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
+                        viewport={"width": 1280, "height": 850}
+                    )
+
+                # Optimización masiva de rendimiento: Bloqueo de multimedia
+                if options.bloquear_multimedia:
+                    async def filter_route(route):
+                        if route.request.resource_type in ("media", "image", "font"):
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    await context.route("**/*", filter_route)
+
+                page = context.pages[0] if context.pages else await context.new_page()
+
+                # 1. Listener de red para atrapar respuestas de la API interna de TikTok
+                async def on_response(response: Response):
+                    req_url = response.url
+                    # A. Catálogo de publicaciones
+                    if "/api/post/item_list" in req_url and response.status == 200:
+                        try:
+                            data = await response.json()
+                            for item in data.get("itemList") or []:
+                                parsed = self.parser.parse_api_item(item, username)
+                                if parsed["id"] not in posts_map:
+                                    posts_map[parsed["id"]] = parsed
+                        except Exception:
+                            pass
+
+                    # B. Comentarios
+                    if ("/api/comment/list" in req_url or "comment/list" in req_url) and response.status == 200:
+                        try:
+                            data = await response.json()
+                            for comm in data.get("comments") or []:
+                                c_id = str(comm.get("cid", ""))
+                                if c_id and not any(c["id"] == c_id for c in captured_comments):
+                                    u = comm.get("user") or {}
+                                    raw_uid = u.get("unique_id") or u.get("uniqueId") or "anónimo"
+                                    captured_comments.append({
+                                        "id": c_id,
+                                        "video_id": "api_intercepted",
+                                        "video_url": f"https://www.tiktok.com/@{username}",
+                                        "author": f"@{raw_uid.lstrip('@')}",
+                                        "author_name": u.get("nickname") or raw_uid,
+                                        "avatar": (u.get("avatar_thumb") or {}).get("url_list", [""])[0] if isinstance(u.get("avatar_thumb"), dict) else "",
+                                        "text": comm.get("text") or "",
+                                        "likes": self.parser.format_number(comm.get("digg_count", 0)),
+                                        "date": time.strftime("%Y-%m-%d", time.localtime(comm.get("create_time", time.time())))
+                                    })
+                        except Exception:
+                            pass
+
+                if options.modo in ("hibrido", "red", "rapido"):
+                    page.on("response", on_response)
+
+                url = f"https://www.tiktok.com/@{username}"
+                await self._log(f"[NETWORK] Navegando a {url}...")
+
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=options.timeout_carga_s * 1000)
+                except Exception as e:
+                    await self._log(f"[WARN] Error inicial cargando {url}: {e}. Reintentando...")
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+
+                # 2. Extracción de datos del perfil desde SSR Hydration
+                await self._log("[PARSER] Inspeccionando datos hidratados de TikTok...")
+                try:
+                    await page.wait_for_selector(SELECTOR_HIDRATACION, state="attached", timeout=8000)
+                    hydration_el = await page.query_selector(SELECTOR_HIDRATACION)
+                    if hydration_el:
+                        raw_json = await hydration_el.inner_text()
+                        hydration_data = json.loads(raw_json)
+                        user_detail = hydration_data.get("__DEFAULT_SCOPE__", {}).get("webapp.user-detail", {})
+                        if user_detail:
+                            profile_data = self.parser.parse_profile(user_detail, username)
+                            # Posts iniciales embebidos en la carga SSR
+                            for item in user_detail.get("itemList") or []:
+                                parsed = self.parser.parse_api_item(item, username)
+                                if parsed["id"] not in posts_map:
+                                    posts_map[parsed["id"]] = parsed
+                            await self._log(f"[SUCCESS] Perfil detectado: {profile_data['name']} (@{profile_data['usuario']}) con {profile_data['followers']} seguidores.")
+                except Exception as e:
+                    await self._log(f"[WARN] No se pudo leer hidratación SSR completa: {e}")
+
+                # 3. Detección de Captcha
+                for c_sel in SELECTORES_CAPTCHA:
+                    if await page.query_selector(c_sel):
+                        await self._log("[CAPTCHA] TikTok ha solicitado verificación.")
+                        if not options.headless:
+                            await self._log("[CAPTCHA] Esperando resolución en ventana (40s)...")
+                            for _ in range(40):
+                                await page.wait_for_timeout(1000)
+                                if not await page.query_selector(c_sel):
+                                    await self._log("[CAPTCHA] Resuelto con éxito.")
+                                    break
+                        break
+
+                # 4. Lectura visual del DOM (Fallback o Modo DOM)
+                if options.modo in ("hibrido", "dom"):
+                    try:
+                        raw_dom_cards = await page.evaluate(JS_LEER_DOM, SELECTOR_POST)
+                        for raw_card in raw_dom_cards:
+                            parsed = self.parser.parse_dom_item(raw_card, username)
+                            if parsed and parsed["id"] not in posts_map:
+                                posts_map[parsed["id"]] = parsed
+                    except Exception:
+                        pass
+
+                # 5. Scrolls adaptativos y humanizados si se requieren más publicaciones
+                if options.modo != "rapido" and options.max_scrolls > 0 and len(posts_map) < options.max_posts:
+                    await self._log(f"[SCROLL] Recolectando publicaciones adicionales (Objetivo: {options.max_posts})...")
+                    sin_nuevos = 0
+                    for s_idx in range(options.max_scrolls):
+                        if len(posts_map) >= options.max_posts:
+                            break
+
+                        cant_anterior = len(posts_map)
+
+                        # Humanización: pequeños movimientos y scroll progresivo
+                        if options.humanizar:
+                            await page.mouse.move(random.randint(400, 800), random.randint(300, 600))
+                            await page.mouse.wheel(0, random.randint(700, 1200))
+                            await page.wait_for_timeout(random.randint(150, 400))
+                        else:
+                            await page.evaluate("window.scrollBy(0, 1000)")
+
+                        await page.wait_for_timeout(options.scroll_delay_ms)
+
+                        # Leer DOM tras el scroll
+                        if options.modo in ("hibrido", "dom"):
+                            try:
+                                raw_dom_cards = await page.evaluate(JS_LEER_DOM, SELECTOR_POST)
+                                for raw_card in raw_dom_cards:
+                                    parsed = self.parser.parse_dom_item(raw_card, username)
+                                    if parsed and parsed["id"] not in posts_map:
+                                        posts_map[parsed["id"]] = parsed
+                            except Exception:
+                                pass
+
+                        nuevos = len(posts_map) - cant_anterior
+                        await self._log(f"[PROGRESS] Scroll {s_idx + 1}/{options.max_scrolls}: {len(posts_map)} posts (+{nuevos})")
+
+                        if nuevos == 0:
+                            sin_nuevos += 1
+                            if sin_nuevos >= options.detener_sin_nuevos:
+                                await self._log("[INFO] No hay más contenido nuevo cargando. Finalizando scrolls.")
+                                break
+                        else:
+                            sin_nuevos = 0
+
+            except Exception as exc:
+                await self._log(f"[ERROR] Error durante el ciclo de scraping: {exc}")
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+
+        # 6. Consolidar métricas finales
+        all_posts = list(posts_map.values())[:options.max_posts]
+        total_plays = sum(p.get("raw_plays", 0) for p in all_posts)
+        total_interactions = sum(p.get("raw_interactions", 0) for p in all_posts)
+        v_count = len(all_posts)
+
+        profile_data["videosCount"] = str(profile_data.get("videos") or v_count)
+
+        if v_count > 0:
+            if total_plays > 0:
+                profile_data["avgViews"] = self.parser.format_number(int(total_plays / v_count))
+                profile_data["engagement"] = f"{round((total_interactions / total_plays) * 100, 2)}%"
+            else:
+                profile_data["avgViews"] = all_posts[0].get("views", "0")
+                profile_data["engagement"] = "0%"
+
+        # Formatear lista de videos para la UI de React / Mobile
+        formatted_videos = []
+        for idx, vid in enumerate(all_posts):
+            formatted_videos.append({
+                "id": vid["id"],
+                "url": vid["url"],
+                "thumbnail": vid.get("thumbnail") or vid.get("portada", ""),
+                "views": vid.get("views", "0"),
+                "likes": vid.get("likes", "0"),
+                "shares": vid.get("shares", "0"),
+                "comments_count": vid.get("comments_count", "0"),
+                "duration": vid.get("duration", "15s"),
+                "duracion": vid.get("duracion", 15),
+                "desc": vid.get("desc") or vid.get("descripcion", ""),
+                "descripcion": vid.get("descripcion") or vid.get("desc", ""),
+                "create_time": vid.get("create_time", 0),
+                "fecha": vid.get("fecha"),
+                "hashtags": vid.get("hashtags", []),
+                "menciones": vid.get("menciones", []),
+                "musica": vid.get("musica", {}),
+                "tipo": vid.get("tipo", "video"),
+                "fijado": vid.get("fijado", False),
+                "estadisticas": vid.get("estadisticas", {})
+            })
+
+        duration_s = round(time.time() - start_time, 2)
+        await self._log(f"[SUCCESS] Extracción finalizada en {duration_s}s: {len(formatted_videos)} publicaciones recolectadas.")
+
+        raw_scrape_result = {
+            "estado": "ok",
+            "usuario": username,
+            "username": username,
+            "perfil": profile_data,
+            "profile": profile_data,
+            "publica": True,
+            "total_posts_extraidos": len(formatted_videos),
+            "posts": formatted_videos,
+            "videos": formatted_videos,
+            "comments": captured_comments,
+            "followers_list": captured_followers,
+            "following_list": captured_following,
+            "meta": {
+                "fecha_scrape": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "duracion_s": duration_s,
+                "opciones": asdict(options)
+            }
+        }
+
+        # Ejecución del motor analítico de reglas e insights
+        try:
+            from contexts.analytics.analytics_service import default_dashboard_builder
+            dashboard = default_dashboard_builder.build(raw_scrape_result)
+            raw_scrape_result["analytics"] = dashboard
+            raw_scrape_result["kpis"] = dashboard.get("kpis", {})
+            raw_scrape_result["insights"] = dashboard.get("insights", [])
+        except Exception as e:
+            await self._log(f"[WARN] No se pudo computar el dashboard analítico: {e}")
+            raw_scrape_result["analytics"] = {}
+
+        return raw_scrape_result
