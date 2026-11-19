@@ -1,6 +1,10 @@
-﻿import asyncio
+﻿import sys
+import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # Cargar el .env ubicado en la misma carpeta que main.py (backend/.env)
 env_path = Path(__file__).resolve().parent / ".env"
@@ -185,7 +189,10 @@ async def websocket_scrape_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        await websocket.send_json({"type": "error", "message": str(e)})
+        import traceback
+        traceback.print_exc()
+        err_msg = str(e).strip() or f"{type(e).__name__}: {repr(e)}"
+        await websocket.send_json({"type": "error", "message": err_msg})
     finally:
         try:
             await websocket.close()

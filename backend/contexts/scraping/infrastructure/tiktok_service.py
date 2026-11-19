@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import json
 import random
 import re
@@ -370,13 +371,17 @@ class TikTokScraperService:
     def __init__(self, log_callback: Optional[Callable[[str], Any]] = None):
         self.log_callback = log_callback
         self.parser = TikTokDataParser()
+        self._current_main_loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def _log(self, message: str) -> None:
         if self.log_callback:
             try:
                 res = self.log_callback(message)
                 if asyncio.iscoroutine(res):
-                    await res
+                    if self._current_main_loop and self._current_main_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(res, self._current_main_loop)
+                    else:
+                        await res
             except Exception:
                 pass
 
@@ -399,7 +404,26 @@ class TikTokScraperService:
         opts.setdefault("max_followers", max_followers)
         scrape_opts = ScrapeOptions.desde_dict(opts)
 
-        return await self._execute_scrape(clean_user, target, scrape_opts)
+        try:
+            main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            main_loop = None
+
+        def _worker_thread():
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            worker_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(worker_loop)
+            self._current_main_loop = main_loop
+            try:
+                return worker_loop.run_until_complete(
+                    self._execute_scrape(clean_user, target, scrape_opts)
+                )
+            finally:
+                worker_loop.close()
+                self._current_main_loop = None
+
+        return await asyncio.to_thread(_worker_thread)
 
     async def _execute_scrape(
         self, username: str, target: str, options: ScrapeOptions
@@ -439,18 +463,44 @@ class TikTokScraperService:
                 # Si sesion_persistente está activada y existe directorio, la usa
                 if options.sesion_persistente:
                     PERFIL_NAVEGADOR_DIR.mkdir(parents=True, exist_ok=True)
-                    context = await playwright.chromium.launch_persistent_context(
-                        str(PERFIL_NAVEGADOR_DIR),
-                        headless=options.headless,
-                        args=launch_args,
-                        user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
-                        viewport={"width": 1280, "height": 850}
-                    )
+                    try:
+                        context = await playwright.chromium.launch_persistent_context(
+                            str(PERFIL_NAVEGADOR_DIR),
+                            headless=options.headless,
+                            args=launch_args,
+                            user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
+                            viewport={"width": 1280, "height": 850}
+                        )
+                    except Exception as p_err:
+                        if sys.platform == "win32":
+                            await self._log(f"[WARN] Chromium persistente falló ({p_err}). Reintentando con Edge...")
+                            context = await playwright.chromium.launch_persistent_context(
+                                str(PERFIL_NAVEGADOR_DIR),
+                                channel="msedge",
+                                headless=options.headless,
+                                args=launch_args,
+                                user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
+                                viewport={"width": 1280, "height": 850}
+                            )
+                        else:
+                            raise p_err
                 else:
-                    browser = await playwright.chromium.launch(
-                        headless=options.headless,
-                        args=launch_args
-                    )
+                    try:
+                        browser = await playwright.chromium.launch(
+                            headless=options.headless,
+                            args=launch_args
+                        )
+                    except Exception as c_err:
+                        if sys.platform == "win32":
+                            await self._log(f"[WARN] Chromium no disponible ({c_err}). Reintentando con Microsoft Edge...")
+                            browser = await playwright.chromium.launch(
+                                channel="msedge",
+                                headless=options.headless,
+                                args=launch_args
+                            )
+                        else:
+                            raise c_err
+
                     context = await browser.new_context(
                         user_agent=USER_AGENTS.get(options.user_agent, USER_AGENTS["chrome_windows"]),
                         viewport={"width": 1280, "height": 850}
@@ -459,10 +509,13 @@ class TikTokScraperService:
                 # Optimización masiva de rendimiento: Bloqueo de multimedia
                 if options.bloquear_multimedia:
                     async def filter_route(route):
-                        if route.request.resource_type in ("media", "image", "font"):
-                            await route.abort()
-                        else:
-                            await route.continue_()
+                        try:
+                            if route.request.resource_type in ("media", "image", "font"):
+                                await route.abort()
+                            else:
+                                await route.continue_()
+                        except Exception:
+                            pass
                     await context.route("**/*", filter_route)
 
                 page = context.pages[0] if context.pages else await context.new_page()
