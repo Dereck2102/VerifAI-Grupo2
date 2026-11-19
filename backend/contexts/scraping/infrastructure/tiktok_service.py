@@ -379,7 +379,7 @@ class TikTokScraperService:
                 res = self.log_callback(message)
                 if asyncio.iscoroutine(res):
                     if self._current_main_loop and self._current_main_loop.is_running():
-                        asyncio.run_coroutine_threadsafe(res, self._current_main_loop)
+                        asyncio.run_coroutine_threadsafe(res, self._current_main_loop).result()
                     else:
                         await res
             except Exception:
@@ -410,9 +410,14 @@ class TikTokScraperService:
             main_loop = None
 
         def _worker_thread():
-            if sys.platform == "win32":
-                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-            worker_loop = asyncio.new_event_loop()
+            # Playwright launches its driver with asyncio subprocess APIs, which
+            # require ProactorEventLoop on Windows. Do not change the process-wide
+            # event-loop policy from this worker thread.
+            worker_loop = (
+                asyncio.ProactorEventLoop()
+                if sys.platform == "win32"
+                else asyncio.new_event_loop()
+            )
             asyncio.set_event_loop(worker_loop)
             self._current_main_loop = main_loop
             try:
@@ -421,9 +426,17 @@ class TikTokScraperService:
                 )
             finally:
                 worker_loop.close()
+                asyncio.set_event_loop(None)
                 self._current_main_loop = None
 
-        return await asyncio.to_thread(_worker_thread)
+        try:
+            return await asyncio.to_thread(_worker_thread)
+        except Exception as exc:
+            await self._log(
+                f"[ERROR] Error durante el ciclo de scraping: "
+                f"{type(exc).__name__}: {exc!r}"
+            )
+            raise
 
     async def _execute_scrape(
         self, username: str, target: str, options: ScrapeOptions
@@ -658,8 +671,6 @@ class TikTokScraperService:
                         else:
                             sin_nuevos = 0
 
-            except Exception as exc:
-                await self._log(f"[ERROR] Error durante el ciclo de scraping: {exc}")
             finally:
                 if context:
                     try:
