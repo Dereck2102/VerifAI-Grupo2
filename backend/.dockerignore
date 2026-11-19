@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env.local
+tiktok_edge_profile/
+tiktok_browser_profile/
+.vscode/
+.git/
+.gitignore
+

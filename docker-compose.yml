@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: verifai_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HEADLESS=1
+      - PORT=8000
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/.env:/app/.env:ro
+    networks:
+      - verifai_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: verifai_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - verifai_network
+
+networks:
+  verifai_network:
+    driver: bridge
+
