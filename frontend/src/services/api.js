@@ -15,10 +15,13 @@ export const fetchSystemInfo = async () => {
 export const connectScraperSocket = ({
   username,
   target,
+  modo = "hibrido",
   max_videos = 19,
   max_comment_videos = 2,
   max_following = 20,
   max_followers = 20,
+  headless = true,
+  bloquear_multimedia = true,
   onLog,
   onResult,
   onError
@@ -31,10 +34,13 @@ export const connectScraperSocket = ({
       JSON.stringify({
         username,
         target,
+        modo,
         max_videos: Number(max_videos),
         max_comment_videos: Number(max_comment_videos),
         max_following: Number(max_following),
-        max_followers: Number(max_followers)
+        max_followers: Number(max_followers),
+        headless: Boolean(headless),
+        bloquear_multimedia: Boolean(bloquear_multimedia)
       })
     );
   };

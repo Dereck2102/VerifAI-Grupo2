@@ -15,11 +15,20 @@ export default function ExtractorPage({ onStartScrape, loading, logs, data, onGo
   
   // Parámetros cuantitativos enviados al backend
   const [limitsConfig, setLimitsConfig] = useState({
+    modo: "hibrido",
     max_videos: 19,
     max_comment_videos: 2,
     max_following: 20,
-    max_followers: 20
+    max_followers: 20,
+    bloquear_multimedia: true,
+    headless: true
   });
+
+  const downloadXLSX = () => {
+    if (!data?.scrape_id) return;
+    const host = window.location.hostname || "127.0.0.1";
+    window.open(`http://${host}:8000/api/export/${data.scrape_id}.xlsx`, "_blank");
+  };
 
   const popularProfiles = [
     { name: "khaby.lame", category: "Comedia / 162M" },
@@ -244,70 +253,100 @@ export default function ExtractorPage({ onStartScrape, loading, logs, data, onGo
           </button>
 
           {showAdvanced && (
-            <div className="mt-4 p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-              
-              {/* 1. Videos a Capturar */}
-              <div className="space-y-1.5">
-                <label className="text-slate-400 flex items-center gap-1.5">
-                  <Video className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Videos a Capturar</span>
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="40"
-                  value={limitsConfig.max_videos}
-                  onChange={(e) => setLimitsConfig({ ...limitsConfig, max_videos: Math.max(1, parseInt(e.target.value) || 1) })}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
+            <div className="mt-4 p-4 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                {/* 1. Videos a Capturar */}
+                <div className="space-y-1.5">
+                  <label className="text-slate-400 flex items-center gap-1.5">
+                    <Video className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Videos a Capturar</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={limitsConfig.max_videos}
+                    onChange={(e) => setLimitsConfig({ ...limitsConfig, max_videos: Math.max(1, parseInt(e.target.value) || 1) })}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {/* 2. Videos para Comentarios */}
+                <div className="space-y-1.5">
+                  <label className="text-slate-400 flex items-center gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Videos para Comentarios</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="10"
+                    value={limitsConfig.max_comment_videos}
+                    onChange={(e) => setLimitsConfig({ ...limitsConfig, max_comment_videos: Math.max(0, parseInt(e.target.value) || 0) })}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {/* 3. Límite Siguiendo */}
+                <div className="space-y-1.5">
+                  <label className="text-slate-400 flex items-center gap-1.5">
+                    <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Límite Siguiendo</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    value={limitsConfig.max_following}
+                    onChange={(e) => setLimitsConfig({ ...limitsConfig, max_following: Math.max(0, parseInt(e.target.value) || 0) })}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {/* 4. Límite Seguidores */}
+                <div className="space-y-1.5">
+                  <label className="text-slate-400 flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-pink-400" />
+                    <span>Límite Seguidores</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    value={limitsConfig.max_followers}
+                    onChange={(e) => setLimitsConfig({ ...limitsConfig, max_followers: Math.max(0, parseInt(e.target.value) || 0) })}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
               </div>
 
-              {/* 2. Videos para Comentarios */}
-              <div className="space-y-1.5">
-                <label className="text-slate-400 flex items-center gap-1.5">
-                  <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Videos para Comentarios</span>
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="10"
-                  value={limitsConfig.max_comment_videos}
-                  onChange={(e) => setLimitsConfig({ ...limitsConfig, max_comment_videos: Math.max(0, parseInt(e.target.value) || 0) })}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
-              </div>
+              {/* Optimización y Modo */}
+              <div className="border-t border-slate-800/80 pt-3 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <label className="text-slate-400 font-medium">Modo de extracción:</label>
+                  <select
+                    value={limitsConfig.modo}
+                    onChange={(e) => setLimitsConfig({ ...limitsConfig, modo: e.target.value })}
+                    className="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-rose-500 text-xs"
+                  >
+                    <option value="hibrido">Híbrido (API + DOM)</option>
+                    <option value="red">Red / API (Ultrarrápido)</option>
+                    <option value="dom">Visual (DOM renderizado)</option>
+                    <option value="rapido">Rápido (Sin scroll)</option>
+                  </select>
+                </div>
 
-              {/* 3. Límite Siguiendo */}
-              <div className="space-y-1.5">
-                <label className="text-slate-400 flex items-center gap-1.5">
-                  <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Límite Siguiendo</span>
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="50"
-                  value={limitsConfig.max_following}
-                  onChange={(e) => setLimitsConfig({ ...limitsConfig, max_following: Math.max(0, parseInt(e.target.value) || 0) })}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              {/* 4. Límite Seguidores */}
-              <div className="space-y-1.5">
-                <label className="text-slate-400 flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-pink-400" />
-                  <span>Límite Seguidores</span>
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="50"
-                  value={limitsConfig.max_followers}
-                  onChange={(e) => setLimitsConfig({ ...limitsConfig, max_followers: Math.max(0, parseInt(e.target.value) || 0) })}
-                  className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white font-mono focus:outline-none focus:border-cyan-500"
-                />
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={limitsConfig.bloquear_multimedia}
+                      onChange={(e) => setLimitsConfig({ ...limitsConfig, bloquear_multimedia: e.target.checked })}
+                      className="rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-0"
+                    />
+                    <span>Bloquear multimedia (Ahorro 70% RAM)</span>
+                  </label>
+                </div>
               </div>
             </div>
           )}
@@ -323,12 +362,21 @@ export default function ExtractorPage({ onStartScrape, loading, logs, data, onGo
           </div>
 
           <div className="flex items-center gap-2">
+            {data?.scrape_id && (
+              <button
+                onClick={downloadXLSX}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-950/60 border border-emerald-700/80 hover:bg-emerald-900 text-emerald-300 transition font-medium cursor-pointer shadow-sm"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Descargar Excel (.xlsx)</span>
+              </button>
+            )}
             <button
               onClick={downloadCSV}
               disabled={!data}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-850 hover:border-slate-700 text-slate-300 disabled:opacity-40 transition font-medium cursor-pointer"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+              <FileSpreadsheet className="w-3.5 h-3.5 text-cyan-400" />
               <span>Descargar CSV ({exportScope})</span>
             </button>
             <button

@@ -4,9 +4,10 @@ import {
   LayoutGrid, List, CheckCircle2, TrendingUp, Heart, 
   Users, Eye, Clock, Share2, Sparkles, Filter, UserCheck, 
   ExternalLink, Activity, Brain, Shield, Award, Compass,
-  Bot, RefreshCw, Lightbulb, Target, CheckCheck
+  Bot, RefreshCw, Lightbulb, Target, CheckCheck, FileSpreadsheet
 } from "lucide-react";
 import StatsCards from "../components/StatsCards";
+import { getBackendHost } from "../services/api";
 
 export default function MetricsPage({ data }) {
   const [internalTab, setInternalTab] = useState("videos");
@@ -165,7 +166,7 @@ export default function MetricsPage({ data }) {
     setLoadingAi(true);
     setAiError(null);
     try {
-      const response = await fetch("http://localhost:8000/api/ai/gemini-report", {
+      const response = await fetch(`http://${getBackendHost()}:8000/api/ai/gemini-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -893,6 +894,38 @@ export default function MetricsPage({ data }) {
                 </div>
               )}
             </div>
+
+            {/* SECCIÓN INSIGHTS REGLAS ANALÍTICAS (MOTOR TIKTOKSCRAPPER) */}
+            {((data?.insights || data?.analytics?.insights || []).length > 0) && (
+              <div className="p-6 rounded-2xl bg-slate-950 border border-slate-800 space-y-4 shadow-xl">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                  <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                    <Lightbulb className="w-4 h-4 text-amber-400" />
+                    <span>Hallazgos del Algoritmo (Reglas de Rendimiento)</span>
+                  </h4>
+                  <span className="text-[10px] font-mono text-slate-500 uppercase">
+                    {(data?.insights || data?.analytics?.insights || []).length} diagnósticos automáticos
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {(data?.insights || data?.analytics?.insights || []).map((ins, idx) => {
+                    const borderColors = {
+                      positivo: "border-emerald-800/50 bg-emerald-950/20 text-emerald-300",
+                      negativo: "border-rose-800/50 bg-rose-950/20 text-rose-300",
+                      aviso: "border-amber-800/50 bg-amber-950/20 text-amber-300",
+                      neutral: "border-slate-800 bg-slate-900/40 text-slate-300"
+                    };
+                    const cls = borderColors[ins.tipo] || borderColors.neutral;
+                    return (
+                      <div key={idx} className={`p-3.5 rounded-xl border ${cls} space-y-1`}>
+                        <p className="font-bold text-xs">{ins.titulo}</p>
+                        <p className="text-[11px] text-slate-400 leading-relaxed font-sans">{ins.texto}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Dimensiones y Marcas Dinámicas */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
